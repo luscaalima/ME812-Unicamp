@@ -1,4 +1,4 @@
-# Projeto de Consultoria — 
+# Projeto de Consultoria 
 
 ## 📌 Sobre o projeto
 
