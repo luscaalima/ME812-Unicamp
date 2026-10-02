@@ -1,0 +1,34 @@
+ENTRADA: tabela de contingência observada (O) entre variável A e variável B
+SAÍDA: decisão sobre associação (sim/não) + força da associação
+
+1. Definir hipóteses:
+   H0: variável A e variável B são independentes
+   H1: variável A e variável B são associadas
+
+2. Definir nível de significância: α = 0,05
+
+3. Calcular tabela de valores esperados (E), assumindo H0 verdadeira
+
+4. Verificar pressupostos do teste:
+   SE mais de 20% das células de E têm valor < 5:
+        → teste qui-quadrado pode não ser confiável
+        → usar teste exato de Fisher (se tabela for 2x2)
+           ou agrupar categorias raras
+   SENÃO:
+        → prosseguir com qui-quadrado normalmente
+
+5. Calcular estatística χ² e p-valor
+
+6. Regra de decisão:
+   SE p-valor < α:
+        → REJEITAR H0
+        → Conclusão: há associação estatisticamente significativa
+   SENÃO:
+        → NÃO REJEITAR H0
+        → Conclusão: não há evidência suficiente de associação
+
+7. Se há associação (passo 6 = rejeitar H0):
+        → calcular Cramér's V para quantificar a FORÇA da associação
+        → classificar força (fraca/moderada/forte)
+
+8. Reportar: χ², gl, p-valor, Cramér's V, e conclusão em linguagem clara
