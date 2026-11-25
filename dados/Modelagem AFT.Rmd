@@ -1,0 +1,395 @@
+---
+title: "Tempo até o diagnóstico na DII pediátrica"
+author: "Consultoria estatística (ME712)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    df_print: kable
+params:
+  arquivo: "Data Set - TABELA TCC ESTATISTICA atualizada.xlsx"
+  versao_tempo: "original"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 4.8)
+library(readxl)
+library(survival)
+library(knitr)
+
+# Formatação de números no padrão brasileiro
+f  <- function(x, d = 2) formatC(x, format = "f", digits = d, decimal.mark = ",")
+fp <- function(p) ifelse(p < 0.001, "< 0,001", f(p, 3))
+cores <- c("#1f5fa8", "#e07b39", "#7f8c8d", "#2e8b57")
+```
+
+**Abordagem:** análise de sobrevivência, com curvas de Kaplan-Meier e um **modelo AFT** (*accelerated failure time*). O AFT modela diretamente o log do tempo e expressa os efeitos como **razões de tempo**. Por exemplo, "o sangramento está associado a um tempo até o diagnóstico X% menor". Para a leitura clínica, essa escala costuma ser mais intuitiva que a razão de riscos do modelo de Cox.
+
+# Dados e preparação
+
+```{r leitura}
+bruto <- read_excel(params$arquivo, sheet = "Tabela", col_types = "text")
+
+novos_nomes <- c("id", "sexo", "classe_idade_orig", "dt_nasc", "idade_inicio_m",
+                 "dt_inicio", "t_consulta_orig", "t_consulta_recalc", "dif_consulta",
+                 "sintoma_orig", "perda_peso_orig", "dt_consulta", "t_colono_orig",
+                 "t_colono_recalc", "dif_colono", "dt_colono", "tipo_dii_orig")
+stopifnot(ncol(bruto) == length(novos_nomes))
+dados <- bruto
+names(dados) <- novos_nomes
+
+# Limpeza de texto: espaços, "?" e células vazias
+limpa_txt <- function(x) {
+  x <- gsub("\\s+", " ", trimws(x))
+  x[x %in% c("", "?", ".", "-", "NA")] <- NA
+  x
+}
+dados[] <- lapply(dados, limpa_txt)
+
+num <- c("idade_inicio_m", "t_consulta_orig", "t_consulta_recalc", "dif_consulta",
+         "t_colono_orig", "t_colono_recalc", "dif_colono")
+dados[num] <- lapply(dados[num], function(x) as.numeric(gsub(",", ".", x)))
+
+para_data <- function(x) {
+  out <- as.Date(rep(NA_real_), origin = "1970-01-01")
+  s <- suppressWarnings(as.numeric(x)); ok <- !is.na(s)
+  out[ok] <- as.Date(s[ok], origin = "1899-12-30")
+  tx <- !ok & !is.na(x)
+  out[tx] <- as.Date(x[tx], tryFormats = c("%d/%m/%Y", "%Y-%m-%d"), optional = TRUE)
+  out
+}
+dt <- c("dt_nasc", "dt_inicio", "dt_consulta", "dt_colono")
+dados[dt] <- lapply(dados[dt], para_data)
+
+# Padronização das categóricas
+dados$sexo        <- factor(toupper(dados$sexo), c("F", "M"), c("Feminino", "Masculino"))
+pp                <- tolower(dados$perda_peso_orig)
+dados$perda_peso  <- factor(ifelse(grepl("^s", pp), "Sim", ifelse(grepl("^n", pp), "Não", NA)),
+                            levels = c("Não", "Sim"))
+dados$tipo_dii    <- factor(toupper(dados$tipo_dii_orig), levels = c("DC", "CU", "CNC"))
+dados$sangramento <- factor(ifelse(dados$sintoma_orig %in% c("Enterorragia", "Hematoquezia"),
+                                   "Sim", "Não"), levels = c("Não", "Sim"))
+dados$classe_idade_orig <- factor(dados$classe_idade_orig, c("VEOIBD", "Início precoce", "DI Ped"))
+dados$classe_idade <- cut(dados$idade_inicio_m, c(-Inf, 71, 119, Inf),
+                          labels = c("VEOIBD", "Início precoce", "DI Ped"))
+
+# Variáveis de análise
+dados$tempo  <- if (params$versao_tempo == "original") dados$t_colono_orig else dados$t_colono_recalc
+dados$tempo[dados$tempo == 0] <- 0.5
+dados$evento <- 1
+dados$idade_inicio_anos <- dados$idade_inicio_m / 12
+dados$idade_diag_m      <- dados$idade_inicio_m + dados$tempo
+dados$janela_m          <- 216 - dados$idade_inicio_m      # tempo máximo observável antes dos 18 anos
+
+analise <- as.data.frame(dados)
+n <- nrow(analise)
+```
+
+## Checagens de consistência
+
+```{r checagens}
+div_classe <- analise[as.character(analise$classe_idade) != as.character(analise$classe_idade_orig),
+                      c("id", "idade_inicio_m", "classe_idade_orig", "classe_idade")]
+acima18 <- analise[analise$idade_diag_m >= 216,
+                   c("id", "idade_inicio_m", "tempo", "idade_diag_m", "dt_nasc", "dt_colono")]
+dif_tempo <- table(analise$t_colono_recalc - analise$t_colono_orig)
+
+chk <- data.frame(
+  Checagem = c("Classe etária digitada ≠ calculada pela idade",
+               "Idade no diagnóstico ≥ 18 anos (fora do critério de inclusão)",
+               "Tempo 'original' ≠ 'recalculado' (diferença de ±1 mês)",
+               "Tempos iguais a zero (log(0) não existe)",
+               "Faltantes nas variáveis do modelo"),
+  Resultado = c(paste0(nrow(div_classe), " paciente (id ", paste(div_classe$id, collapse = ", "), ")"),
+                paste0(nrow(acima18), " paciente (id ", paste(acima18$id, collapse = ", "), ")"),
+                paste0(sum(dif_tempo[names(dif_tempo) != "0"]), " pacientes"),
+                paste0("original: ", sum(analise$t_colono_orig == 0),
+                       "; recalculado: ", sum(analise$t_colono_recalc == 0)),
+                sum(!complete.cases(analise[, c("tempo", "idade_inicio_m", "sexo", "tipo_dii", "sangramento")])))
+)
+kable(chk)
+```
+
+# Suposições e decisões
+
+## Decisões de análise
+
+| Decisão | O que foi feito | Por quê |
+|---|---|---|
+| Desfecho | Meses do início dos sintomas até a 1ª colonoscopia, coluna "`r params$versao_tempo`" | É o marco diagnóstico definido no projeto. A coluna original não tem zeros. |
+| Censura | Nenhuma: todos os pacientes têm o evento | A amostra é formada só por pacientes já diagnosticados. |
+| Modelo | AFT paramétrico | Interpretação direta em razão de tempos; dispensa a suposição de riscos proporcionais do Cox. |
+| Distribuição | Log-normal, escolhida por AIC e por gráficos de linearização | Ver seção 5. |
+| Covariáveis | Definidas **antes** de ver os resultados: idade de início (contínua), sangramento, tipo de DII e sexo | Com cerca de 100 eventos, a seleção automática (stepwise) tende a selecionar ruído. O modelo tem 5 parâmetros, abaixo do limite prático de 1 parâmetro para cada 10 eventos. |
+| Idade | Contínua, em anos | As classes desperdiçam informação, e o grupo de início precoce é pequeno (n = `r sum(analise$classe_idade == "Início precoce")`). |
+| Perda ponderal | **Fora** do modelo principal | Pode ser **consequência** do atraso (mediador ou causalidade reversa), e não uma causa dele. |
+
+## Suposições do modelo AFT log-normal
+
+O modelo assume que
+
+$$\log(T_i) = \beta_0 + \beta_1 x_{1i} + \dots + \beta_p x_{pi} + \sigma\,\varepsilon_i, \qquad \varepsilon_i \sim N(0,1).$$
+
+Isso implica quatro suposições:
+
+1. **Distribuição:** depois do ajuste pelas covariáveis, o log do tempo segue uma distribuição normal. Isso é verificado com os gráficos da seção 5 e os resíduos da seção 6.5.
+2. **Efeito multiplicativo e constante:** cada covariável multiplica o tempo por um fator fixo, $e^{\beta}$, a **razão de tempos (RT)**. O mesmo fator vale para a mediana, para o percentil 25, para o percentil 75 etc.
+3. **Linearidade:** a idade atua de forma linear no log do tempo. Cada ano a mais multiplica o tempo pelo mesmo fator.
+4. **Observações independentes** e **amostra representativa** do tempo até o diagnóstico. Esta é a suposição mais frágil (ver o truncamento na seção 8).
+
+**Como ler a razão de tempos:** RT < 1 indica diagnóstico mais rápido; RT > 1 indica diagnóstico mais demorado; se o IC 95% contém 1, não há evidência de efeito.
+
+# Análise descritiva
+
+```{r descritiva}
+desc <- function(v) {
+  tb <- table(analise[[v]])
+  med <- tapply(analise$tempo, analise[[v]], median)
+  iiq <- tapply(analise$tempo, analise[[v]],
+                function(x) paste0(f(quantile(x, .25), 1), " – ", f(quantile(x, .75), 1)))
+  data.frame(Variável = c(rotulos[v], rep("", length(tb) - 1)), Categoria = names(tb),
+             n = as.integer(tb), `%` = f(100 * as.numeric(tb) / n, 1),
+             `Mediana (meses)` = f(med, 1), `IIQ (meses)` = iiq, check.names = FALSE, row.names = NULL)
+}
+rotulos <- c(sexo = "Sexo", classe_idade = "Classe etária", tipo_dii = "Tipo de DII",
+             sangramento = "Sangramento retal", perda_peso = "Perda ponderal")
+tab_desc <- do.call(rbind, lapply(names(rotulos), desc))
+kable(tab_desc, caption = "Tempo até o diagnóstico (meses) por característica")
+```
+
+O tempo até o diagnóstico tem mediana de **`r median(analise$tempo)` meses** (IIQ `r quantile(analise$tempo, .25)`–`r quantile(analise$tempo, .75)`; mínimo `r min(analise$tempo)`, máximo `r max(analise$tempo)`). A distribuição é **muito assimétrica**: a média (`r f(mean(analise$tempo), 1)` meses) é bem maior que a mediana. Isso justifica modelar o log do tempo.
+
+## Curvas de Kaplan-Meier
+
+As curvas mostram a **proporção de crianças ainda sem diagnóstico** ao longo do tempo. Quanto mais rápido a curva cai, mais cedo o grupo é diagnosticado.
+
+```{r km, fig.height=8}
+km_plot <- function(var, titulo) {
+  fit <- survfit(as.formula(paste("Surv(tempo, evento) ~", var)), data = analise)
+  lr  <- survdiff(as.formula(paste("Surv(tempo, evento) ~", var)), data = analise)
+  p   <- pchisq(lr$chisq, length(lr$n) - 1, lower.tail = FALSE)
+  niv <- levels(analise[[var]])
+  plot(fit, col = cores[seq_along(niv)], lwd = 2, xlab = "Meses desde o início dos sintomas",
+       ylab = "Proporção sem diagnóstico", main = paste0(titulo, "\nLog-rank p = ", fp(p)), xlim = c(0, 100))
+  abline(h = 0.5, lty = 3, col = "grey50")
+  legend("topright", bty = "n", col = cores[seq_along(niv)], lwd = 2,
+         legend = paste0(niv, " (n=", as.integer(table(analise[[var]])), ")"))
+}
+par(mfrow = c(2, 2), mar = c(4.5, 4.5, 4, 1))
+km_plot("classe_idade", "Classe etária")
+km_plot("sangramento", "Sangramento retal")
+km_plot("tipo_dii", "Tipo de DII")
+km_plot("sexo", "Sexo")
+```
+
+**Leitura:** sem nenhum ajuste, só a **classe etária** separa as curvas (as crianças menores demoram mais). Sangramento, tipo de DII e sexo não mostram diferença clara. Como se verá na seção 6.3, essa visão sem ajuste esconde o efeito do sangramento.
+
+# Escolha da distribuição
+
+Por ser paramétrico, o AFT exige escolher a distribuição do tempo. Foram comparadas as distribuições usuais por **AIC**, primeiro sem covariáveis e depois com as covariáveis do modelo. Quanto menor o AIC, melhor. Diferenças abaixo de 2 indicam modelos praticamente equivalentes; diferenças acima de 4 já indicam suporte claramente menor.
+
+```{r aic}
+form <- Surv(tempo, evento) ~ idade_inicio_anos + sangramento + tipo_dii + sexo
+dists <- c(Exponencial = "exponential", Weibull = "weibull",
+           `Log-normal` = "lognormal", `Log-logística` = "loglogistic")
+aic0 <- sapply(dists, function(d) AIC(survreg(Surv(tempo, evento) ~ 1, data = analise, dist = d)))
+aic1 <- sapply(dists, function(d) AIC(survreg(form, data = analise, dist = d)))
+tab_aic <- data.frame(Distribuição = names(dists),
+                      `AIC sem covariáveis` = f(aic0, 1), `Δ` = f(aic0 - min(aic0), 1),
+                      `AIC com covariáveis` = f(aic1, 1), `Δ ` = f(aic1 - min(aic1), 1),
+                      check.names = FALSE, row.names = NULL)
+kable(tab_aic[order(aic1), ], row.names = FALSE)
+```
+
+```{r linearizacao, fig.height=3.6, fig.width=10}
+km0 <- survfit(Surv(tempo, evento) ~ 1, data = analise)
+ok <- km0$surv > 0 & km0$surv < 1; lt <- log(km0$time[ok]); s <- km0$surv[ok]
+par(mfrow = c(1, 3), mar = c(4.5, 4.5, 3, 1))
+for (g in list(list("Weibull", log(-log(s)), "log(-log S)"),
+               list("Log-logística", log((1 - s) / s), "log[(1-S)/S]"),
+               list("Log-normal", qnorm(1 - s), "qnorm(1-S)"))) {
+  plot(lt, g[[2]], pch = 19, col = cores[1], xlab = "log(meses)", ylab = g[[3]], main = g[[1]])
+  abline(lm(g[[2]] ~ lt), col = cores[2], lwd = 2)
+}
+```
+
+**Decisão:** **log-normal**. Ela tem o menor AIC com e sem covariáveis, e no gráfico de linearização os pontos ficam mais próximos da reta, sobretudo nos atrasos longos. A log-logística fica como análise de sensibilidade.
+
+# Resultados do modelo principal
+
+## Ajuste
+
+```{r modelo}
+modelo <- survreg(form, data = analise, dist = "lognormal")
+st  <- summary(modelo)$table
+ic  <- confint(modelo)
+lbl <- c(idade_inicio_anos = "Idade de início (por ano)", sangramentoSim = "Sangramento retal (sim vs não)",
+         tipo_diiCU = "CU vs DC", tipo_diiCNC = "CNC vs DC", sexoMasculino = "Masculino vs feminino")
+v <- names(lbl)
+tab_mod <- data.frame(Variável = lbl, β = f(st[v, "Value"], 3),
+                      RT = f(exp(st[v, "Value"])),
+                      `IC 95%` = paste0(f(exp(ic[v, 1])), " – ", f(exp(ic[v, 2]))),
+                      `Variação no tempo` = paste0(ifelse(exp(st[v, "Value"]) < 1, "−", "+"),
+                                                   f(abs(100 * (exp(st[v, "Value"]) - 1)), 0), "%"),
+                      p = fp(st[v, "p"]), check.names = FALSE, row.names = NULL)
+kable(tab_mod, caption = "AFT log-normal: razões de tempo (RT) e IC 95%")
+
+lr <- 2 * (modelo$loglik[2] - modelo$loglik[1]); gl <- length(coef(modelo)) - 1
+```
+
+- **Teste global** (razão de verossimilhanças contra o modelo sem covariáveis): χ² = `r f(lr)`, com `r gl` graus de liberdade, p = `r fp(pchisq(lr, gl, lower.tail = FALSE))`.
+- **Escala estimada** σ = `r f(modelo$scale)`: é o desvio-padrão do log do tempo depois do ajuste. Ainda há bastante variabilidade individual não explicada.
+
+## Interpretação
+
+```{r rt}
+rt <- exp(coef(modelo)); ci <- exp(ic)
+```
+
+- **Idade de início:** cada ano a mais está associado a um tempo até o diagnóstico **`r f(100 * (1 - rt["idade_inicio_anos"]), 0)`% menor** (RT = `r f(rt["idade_inicio_anos"])`; IC 95% `r f(ci["idade_inicio_anos", 1])`–`r f(ci["idade_inicio_anos", 2])`). Em 5 anos, o tempo fica multiplicado por `r f(rt["idade_inicio_anos"]^5)`. **Crianças menores demoram mais para ser diagnosticadas.**
+- **Sangramento retal:** está associado a um tempo **`r f(100 * (1 - rt["sangramentoSim"]), 0)`% menor** (RT = `r f(rt["sangramentoSim"])`; IC 95% `r f(ci["sangramentoSim", 1])`–`r f(ci["sangramentoSim", 2])`), comparando crianças de mesma idade, tipo de DII e sexo. Isso **apoia a hipótese principal**.
+- **Tipo de DII e sexo:** não há evidência de associação; todos os IC 95% contêm 1.
+
+**Medianas previstas pelo modelo** (menina com DC), para traduzir as razões de tempo em meses:
+
+```{r predicao}
+nd <- expand.grid(idade_inicio_anos = c(2, 7, 12), sangramento = c("Não", "Sim"),
+                  tipo_dii = "DC", sexo = "Feminino")
+nd$med <- predict(modelo, nd, type = "quantile", p = 0.5)
+tab_pred <- data.frame(`Idade de início` = paste(c(2, 7, 12), "anos"),
+                       `Sem sangramento` = paste(f(nd$med[nd$sangramento == "Não"], 1), "meses"),
+                       `Com sangramento` = paste(f(nd$med[nd$sangramento == "Sim"], 1), "meses"),
+                       check.names = FALSE)
+kable(tab_pred)
+```
+
+## Confundimento: por que o sangramento "aparece" só no modelo ajustado
+
+```{r confundimento}
+m_bruto <- survreg(Surv(tempo, evento) ~ sangramento, data = analise, dist = "lognormal")
+pb <- summary(m_bruto)$table["sangramentoSim", "p"]
+prop_sang <- prop.table(table(analise$classe_idade, analise$sangramento), 1)[, "Sim"]
+kable(data.frame(`Classe etária` = names(prop_sang), `% com sangramento` = f(100 * prop_sang, 0),
+                 `Mediana do tempo (meses)` = tapply(analise$tempo, analise$classe_idade, median),
+                 check.names = FALSE, row.names = NULL))
+```
+
+- **Sem ajuste**, o efeito do sangramento é pequeno e não significativo: RT = `r f(exp(coef(m_bruto)[2]))`, p = `r fp(pb)`. Isso é coerente com o teste de Mann-Whitney da análise descritiva.
+- **Ajustado pela idade**, ele fica forte: RT = `r f(rt["sangramentoSim"])`.
+
+A explicação é que **a idade é um confundidor**:
+
+- o sangramento é muito mais frequente nas crianças pequenas;
+- as crianças pequenas demoram mais para ser diagnosticadas, por outros motivos.
+
+Na comparação bruta, o grupo com sangramento está "carregado" de crianças pequenas, e isso cancela o efeito do sangramento. Esse é o principal argumento para usar um modelo multivariado em vez de testes univariados.
+
+## Interação sangramento × idade
+
+```{r interacao}
+m_int <- survreg(Surv(tempo, evento) ~ idade_inicio_anos * sangramento + tipo_dii + sexo,
+                 data = analise, dist = "lognormal")
+ti <- summary(m_int)$table
+b  <- coef(m_int)
+lr_int <- 2 * (m_int$loglik[2] - modelo$loglik[2])
+idades <- c(1, 4, 8, 12, 16)
+rt_idade <- exp(b["sangramentoSim"] + b["idade_inicio_anos:sangramentoSim"] * idades)
+kable(data.frame(`Idade de início (anos)` = idades, `RT do sangramento` = f(rt_idade),
+                 check.names = FALSE), caption = "Efeito do sangramento conforme a idade (modelo com interação)")
+```
+
+A interação ficou no limite da significância (teste da razão de verossimilhanças p = `r fp(pchisq(lr_int, 1, lower.tail = FALSE))`). O padrão indica que o sangramento **acelera bastante o diagnóstico nas crianças pequenas**, e esse efeito vai desaparecendo na adolescência. Isso é clinicamente plausível e coerente com a análise estratificada. O estudo tem pouco poder para detectar interações, então esse resultado deve ser apresentado como **exploratório**.
+
+## Adequação do modelo (resíduos de Cox-Snell)
+
+Se o modelo está adequado, os resíduos de Cox-Snell seguem uma exponencial de média 1. No gráfico, os pontos devem ficar sobre a reta de 45°.
+
+```{r coxsnell, fig.width=5.5, fig.height=5}
+lp <- predict(modelo, type = "lp")
+r_cs <- -pnorm((log(analise$tempo) - lp) / modelo$scale, lower.tail = FALSE, log.p = TRUE)
+km_r <- survfit(Surv(r_cs, analise$evento) ~ 1)
+plot(km_r$time, -log(km_r$surv), pch = 19, col = cores[1],
+     xlab = "Resíduo de Cox-Snell", ylab = "Risco acumulado estimado", main = "Resíduos de Cox-Snell")
+abline(0, 1, col = cores[2], lwd = 2)
+```
+
+**Leitura:** os pontos acompanham a reta em quase toda a extensão, então o ajuste log-normal é adequado. O afastamento no extremo direito envolve poucos pacientes, os de maior resíduo, e é esperado em amostras pequenas, onde a cauda da curva é estimada com pouca informação.
+
+# Análises de sensibilidade
+
+```{r sensibilidade}
+horizonte <- function(df, tau) {
+  df <- df[df$janela_m >= tau, ]
+  df$evento <- as.numeric(df$tempo <= tau)
+  df$tempo  <- pmin(df$tempo, tau)
+  df
+}
+cenarios <- list(
+  "Principal (log-normal)"          = list(analise, "lognormal"),
+  "Distribuição log-logística"      = list(analise, "loglogistic"),
+  "Excluindo paciente ≥ 18 anos"    = list(analise[analise$idade_diag_m < 216, ], "lognormal"),
+  "Excluindo CNC"                   = list(droplevels(analise[analise$tipo_dii != "CNC", ]), "lognormal"),
+  "Horizonte comum 36 meses"        = list(horizonte(analise, 36), "lognormal"),
+  "Horizonte comum 48 meses"        = list(horizonte(analise, 48), "lognormal")
+)
+res <- do.call(rbind, lapply(names(cenarios), function(nm) {
+  d <- cenarios[[nm]][[1]]
+  m <- survreg(form, data = d, dist = cenarios[[nm]][[2]])
+  ci <- exp(confint(m))
+  data.frame(Cenário = nm, n = nrow(d), Censurados = sum(d$evento == 0),
+             `RT idade (IC 95%)` = paste0(f(exp(coef(m)["idade_inicio_anos"])), " (",
+                                          f(ci["idade_inicio_anos", 1]), "–", f(ci["idade_inicio_anos", 2]), ")"),
+             `RT sangramento (IC 95%)` = paste0(f(exp(coef(m)["sangramentoSim"])), " (",
+                                                f(ci["sangramentoSim", 1]), "–", f(ci["sangramentoSim", 2]), ")"),
+             check.names = FALSE, row.names = NULL)
+}))
+kable(res)
+```
+
+O que cada cenário testa:
+
+- **Log-logística:** se o resultado depende da escolha da distribuição.
+- **Excluindo o paciente com 18 anos no diagnóstico:** o efeito de seguir estritamente o critério de inclusão.
+- **Excluindo CNC:** parte desses casos pode ter etiologia diferente (por exemplo, monogênica no VEO-IBD).
+- **Horizonte comum (36 e 48 meses):** corrige parcialmente o **truncamento pela idade** (seção 8). Mantém só quem tinha ao menos τ meses de janela antes dos 18 anos e censura em τ os atrasos maiores, de modo que todas as crianças passam a ter a mesma "oportunidade" de atraso.
+
+```{r faixa-sens, include=FALSE}
+modelos_sens <- lapply(names(cenarios), function(nm)
+  survreg(form, data = cenarios[[nm]][[1]], dist = cenarios[[nm]][[2]]))
+rt_id <- sapply(modelos_sens, function(m) exp(coef(m)["idade_inicio_anos"]))
+rt_sg <- sapply(modelos_sens, function(m) exp(coef(m)["sangramentoSim"]))
+```
+
+**Leitura:** em todos os cenários, a RT da idade ficou entre `r f(min(rt_id))` e `r f(max(rt_id))`, e a do sangramento entre `r f(min(rt_sg))` e `r f(max(rt_sg))`, sempre com IC 95% abaixo de 1. Os achados principais são **robustos** à escolha da distribuição, à exclusão de casos e ao horizonte comum. No horizonte comum, que reduz o efeito do truncamento, os efeitos da idade e do sangramento **não diminuíram**. Isso sugere que o efeito da idade não é só um artefato do desenho, embora o truncamento não seja totalmente eliminado por essa estratégia.
+
+# Limitações
+
+1. **Truncamento à direita pela idade (principal limitação).** Só entram no estudo crianças diagnosticadas antes dos 18 anos. Uma criança com início aos 15 anos só aparece se o atraso for menor que 36 meses; uma com início aos 2 anos pode aparecer com atraso de até 16 anos. Isso cria, **por construção**, uma associação negativa entre idade e atraso, e parte do efeito da idade pode ser artefato. O horizonte comum atenua o problema, mas não o elimina. A exigência de acompanhamento ativo na pediatria atua no mesmo sentido.
+2. **Amostra de um único centro de referência, só com diagnosticados.** Não inclui crianças diagnosticadas em outros serviços nem as que ainda não foram diagnosticadas. A generalização é limitada.
+3. **Dados retrospectivos.** O início dos sintomas é relatado pela família e registrado em meses, o que gera erro de medida e arredondamento: as duas colunas de tempo diferem em ±1 mês para cerca de metade dos pacientes.
+4. **Tamanho de amostra.** Com cerca de 100 pacientes, o estudo tem poder limitado para efeitos moderados (tipo de DII, sexo) e sobretudo para interações. Resultados não significativos **não** demonstram ausência de efeito.
+5. **Covariáveis disponíveis.** Faltam variáveis potencialmente importantes, como acesso a serviço de saúde, primeiro serviço procurado, nível socioeconômico e região de origem.
+6. **Sintoma inicial como variável única.** Muitas crianças têm vários sintomas. Classificar só o primeiro simplifica a apresentação clínica.
+
+# Próximos passos
+
+1. **Resolver as pendências de dados** com a pesquisadora: classe etária do paciente `r div_classe$id` e inclusão do paciente `r acima18$id`.
+2. **Definir com a orientadora o conjunto final de covariáveis** e se a interação sangramento × idade entra no modelo principal ou como análise exploratória. Opcionalmente, formalizar com um DAG.
+3. **Escolher a coluna de tempo** ("original" ou "recalculada") e registrar a escolha nos métodos.
+4. **Tratar o truncamento de forma explícita** com uma verossimilhança condicional ao truncamento, em que cada paciente contribui com $f(t_i)/F(R_i)$, sendo $R_i = 216 -$ idade de início. Isso complementa a análise com horizonte comum.
+5. **Ajustar o Cox como análise complementar**, verificando a proporcionalidade (resíduos de Schoenfeld) e usando o método de Efron para os empates.
+6. **Redigir os métodos e os resultados**, com a tabela de RT, as curvas de KM e as medianas previstas.
+
+# Perguntas para a orientadora
+
+- O enquadramento AFT (razão de tempos), com o Cox como complemento, é adequado para o TCC? Ou ela prefere o Cox como modelo principal?
+- O conjunto de covariáveis pré-especificado está de acordo? Alguma variável deveria entrar ou sair, em especial a perda ponderal?
+- Qual tratamento do truncamento é suficiente para o escopo do trabalho: só o horizonte comum, ou também a verossimilhança truncada?
+- A interação sangramento × idade deve ser apresentada como resultado principal ou exploratório?
+
+---
+
+<small>Sessão: R `r getRversion()`; pacotes survival `r packageVersion("survival")`, readxl `r packageVersion("readxl")`.</small>

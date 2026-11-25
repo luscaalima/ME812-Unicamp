@@ -1,0 +1,250 @@
+---
+title: "Untitled"
+author: "Mariana"
+date: "2026-11-04"
+output: html_document
+---
+
+---
+title: "Análise Descritiva"
+output: html_document
+---
+
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+dados_limpos <- read.csv("dataframe_limpo.csv", header = FALSE, sep = ",")
+names(dados_limpos)
+```
+
+```{r setup, message=FALSE, warning=FALSE}
+# 1. Pega os nomes que estão na primeira linha
+nomes_corretos <- as.character(dados_limpos[1, ])
+
+# 2. Aplica esses nomes como cabeçalho das colunas
+colnames(dados_limpos) <- nomes_corretos
+
+# 3. Remove a primeira linha (que agora é só o texto do cabeçalho repetido)
+dados_limpos <- dados_limpos[-1, ]
+```
+
+
+
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+
+dados_limpos <- read_csv(
+  file.choose(),
+  na = c("", "NA", "?")
+)
+```
+
+## Tabelas de frequência
+
+```{r}
+kable(
+  dados_limpos %>%
+    count(sexo) %>%
+    mutate(Percentual = round(n / sum(n) * 100, 1))
+)
+```
+
+```{r}
+kable(
+  dados_limpos %>%
+    count(Diagnostico) %>%
+    mutate(Percentual = round(n / sum(n) * 100, 1))
+)
+```
+
+```{r}
+kable(
+  dados_limpos %>%
+    count(class.idade) %>%
+    mutate(Percentual = round(n / sum(n) * 100, 1))
+)
+```
+
+```{r}
+kable(
+  dados_limpos %>%
+    count(sintoma_inicial) %>%
+    mutate(Percentual = round(n / sum(n) * 100, 1))
+)
+```
+
+```{r}
+kable(
+  dados_limpos %>%
+    count(Perda.de.peso) %>%
+    mutate(Percentual = round(n / sum(n) * 100, 1))
+)
+```
+
+## Medidas descritivas
+
+```{r}
+dados_limpos %>%
+  summarise(
+    Media = mean(idade_sintomas_meses, na.rm = TRUE),
+    Desvio_Padrao = sd(idade_sintomas_meses, na.rm = TRUE),
+    Mediana = median(idade_sintomas_meses, na.rm = TRUE),
+    Minimo = min(idade_sintomas_meses, na.rm = TRUE),
+    Maximo = max(idade_sintomas_meses, na.rm = TRUE)
+  ) %>%
+  kable(digits = 2)
+```
+
+```{r}
+dados_limpos %>%
+  summarise(
+    Media = mean(idade_primeira_consulta_anos, na.rm = TRUE),
+    Desvio_Padrao = sd(idade_primeira_consulta_anos, na.rm = TRUE),
+    Mediana = median(idade_primeira_consulta_anos, na.rm = TRUE),
+    Minimo = min(idade_primeira_consulta_anos, na.rm = TRUE),
+    Maximo = max(idade_primeira_consulta_anos, na.rm = TRUE)
+  ) %>%
+  kable(digits = 2)
+```
+
+```{r}
+dados_limpos %>%
+  summarise(
+    Media = mean(tempo_sint_consulta_m, na.rm = TRUE),
+    Desvio_Padrao = sd(tempo_sint_consulta_m, na.rm = TRUE),
+    Mediana = median(tempo_sint_consulta_m, na.rm = TRUE),
+    Minimo = min(tempo_sint_consulta_m, na.rm = TRUE),
+    Maximo = max(tempo_sint_consulta_m, na.rm = TRUE)
+  ) %>%
+  kable(digits = 2)
+```
+
+```{r}
+dados_limpos %>%
+  summarise(
+    Media = mean(tempo_sint_colono_m, na.rm = TRUE),
+    Desvio_Padrao = sd(tempo_sint_colono_m, na.rm = TRUE),
+    Mediana = median(tempo_sint_colono_m, na.rm = TRUE),
+    Minimo = min(tempo_sint_colono_m, na.rm = TRUE),
+    Maximo = max(tempo_sint_colono_m, na.rm = TRUE)
+  ) %>%
+  kable(digits = 2)
+```
+
+## Gráficos
+
+```{r}
+# Gráfico 1
+ggplot(dados_limpos, aes(x = sexo, fill = sexo)) +
+  geom_bar() +
+  labs(
+    title = "Distribuição dos pacientes segundo o sexo",
+    x = "Sexo",
+    y = "Frequência"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Gráfico 2
+ggplot(dados_limpos, aes(x = idade_sintomas_meses)) +
+  geom_histogram(binwidth = 12, color = "white") +
+  labs(
+    title = "Idade no início dos sintomas",
+    x = "Idade (meses)",
+    y = "Frequência"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Gráfico 3
+ggplot(dados_limpos, aes(x = class.idade, fill = class.idade)) +
+  geom_bar() +
+  labs(
+    title = "Distribuição segundo a classificação da idade de início",
+    x = "Classificação",
+    y = "Frequência"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Gráfico 4
+ggplot(dados_limpos, aes(x = idade_primeira_consulta_anos)) +
+  geom_histogram(binwidth = 1, color = "white") +
+  labs(
+    title = "Idade na primeira consulta",
+    x = "Idade (anos)",
+    y = "Frequência"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Gráfico 5
+ggplot(dados_limpos, aes(x = sintoma_inicial)) +
+  geom_bar(fill = "gray60") +
+  labs(
+    title = "Distribuição dos pacientes segundo o sintoma inicial",
+    x = "Sintoma inicial",
+    y = "Frequência"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# Gráfico 6
+ggplot(dados_limpos, aes(x = Perda.de.peso, fill = Perda.de.peso)) +
+  geom_bar() +
+  labs(
+    title = "Distribuição segundo a presença de perda de peso",
+    x = "Perda de peso",
+    y = "Frequência"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Gráfico 7
+ggplot(dados_limpos, aes(x = Diagnostico, fill = Diagnostico)) +
+  geom_bar() +
+  labs(
+    title = "Distribuição dos pacientes segundo o diagnóstico",
+    x = "Diagnóstico",
+    y = "Frequência"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Gráfico 8
+ggplot(dados_limpos, aes(x = tempo_sint_consulta_m)) +
+  geom_histogram(binwidth = 6, color = "white") +
+  labs(
+    title = "Tempo entre o início dos sintomas e a primeira consulta",
+    x = "Tempo (meses)",
+    y = "Frequência"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Gráfico 9
+ggplot(dados_limpos, aes(x = tempo_sint_colono_m)) +
+  geom_histogram(binwidth = 6, color = "white") +
+  labs(
+    title = "Tempo entre o início dos sintomas e a primeira colonoscopia",
+    x = "Tempo (meses)",
+    y = "Frequência"
+  ) +
+  theme_minimal()
+```
